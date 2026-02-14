@@ -3,7 +3,7 @@ name: Auto Refresh Strategy
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 22 * * 1-5"   # 22:15 UTC weekdays (adjust as needed)
+    - cron: "*/3 14-21 * * 1-5"   # 22:15 UTC weekdays (adjust as needed)
 
 permissions:
   contents: write
