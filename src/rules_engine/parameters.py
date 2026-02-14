@@ -1,11 +1,34 @@
-from .conditions import Params
+from dataclasses import dataclass
 
-DEFAULT_PARAMS = Params(
-    confirm_buffer=0.05,              # placeholder units: dollars unless normalized; finalize with key-level spec
-    retest_tolerance=0.03,            # same note as above
-    min_rejection_wick_ratio=0.25,    # 25% wick rejection
-    thresholdA_min_excursion=0.20,    # placeholder; can map to ATR multiple later
-    thresholdB_close_strength=0.55,   # close in top 55% of range for longs
-    max_retest_bars=4,                # 4 x 15m = 60 min
-    stop_buffer=0.01                  # placeholder tick buffer
-)
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    # Timeframes
+    external_tf: str = "15min"
+    execution_tf: str = "3min"
+
+    # Session
+    rth_only: bool = True
+
+    # Universe
+    include_indices: bool = True
+    include_large_caps: bool = True
+    include_etfs: bool = True
+
+    # Structure / displacement
+    displacement_atr_mult: float = 0.7
+    min_break_close_buffer_atr: float = 0.05
+
+    # Retest / reclaim
+    reclaim_buffer_atr: float = 0.03
+    max_retest_bars_execution_tf: int = 8  # 8 x 3m = 24m
+
+    # Liquidity / equal highs-lows tolerance
+    equal_level_tolerance_atr: float = 0.08
+
+    # Risk
+    stop_buffer_atr: float = 0.05
+    rr_target: float = 2.0  # structure target logic can replace later
+
+    # Reporting
+    risk_per_trade_pct: float = 0.005  # 0.5%
