@@ -11,18 +11,57 @@ from src.rules_engine.signals import generate_signal_for_bar
 from src.rules_engine.risk import initial_stop, target_from_rr
 
 
-def load_csv(path: Path) -> pd.DataFrame:
+def load_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
+
+    # normalize column names
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    # timestamp alias handling
     if "timestamp" not in df.columns:
-        raise ValueError(f"{path} missing 'timestamp' column")
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        for alt in ("datetime", "date", "time", "index"):
+            if alt in df.columns:
+                df = df.rename(columns={alt: "timestamp"})
+                break
+
+    # ohlcv alias handling
+    alias = {
+        "adj close": "close",
+        "adj_close": "close",
+        "vol": "volume",
+        "o": "open",
+        "h": "high",
+        "l": "low",
+        "c": "close",
+        "v": "volume",
+    }
+    for src, dst in alias.items():
+        if src in df.columns and dst not in df.columns:
+            df = df.rename(columns={src: dst})
+
+    required = {"timestamp", "open", "high", "low", "close", "volume"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"{path} missing columns: {missing}")
+
+    # CRITICAL: force UTC tz-aware timestamps so downstream tz_convert is valid
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+
+    for c in ["open", "high", "low", "close", "volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df = df.dropna(subset=["timestamp", "open", "high", "low", "close"])
+    df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+
+    # OHLC sanity
+    df = df[(df["high"] >= df["low"])]
+    df = df[(df["open"] <= df["high"]) & (df["open"] >= df["low"])]
+    df = df[(df["close"] <= df["high"]) & (df["close"] >= df["low"])]
+
+    # downstream feature funcs expect DatetimeIndex
     df = df.set_index("timestamp").sort_index()
     df.index.name = "timestamp"
 
-    needed = {"open", "high", "low", "close", "volume"}
-    missing = needed - set(df.columns)
-    if missing:
-        raise ValueError(f"{path} missing columns: {missing}")
     return df
 
 
@@ -45,6 +84,12 @@ def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
     return x.rename(columns={x.columns[0]: "timestamp"})
 
 
+def _to_ny_timestamp(series: pd.Series) -> pd.Series:
+    # robust normalize to tz-aware then convert
+    s = pd.to_datetime(series, errors="coerce", utc=True)
+    return s.dt.tz_convert("America/New_York")
+
+
 def merge_3m_with_15m_state(df_3m: pd.DataFrame, df_15m_state: pd.DataFrame) -> pd.DataFrame:
     cols = ["external_bias", "protected_swing_high", "protected_swing_low", "atr", "bos_flag", "choch_flag"]
     state = df_15m_state[cols].copy()
@@ -52,8 +97,8 @@ def merge_3m_with_15m_state(df_3m: pd.DataFrame, df_15m_state: pd.DataFrame) -> 
     left = _ensure_timestamp_column(df_3m).sort_values("timestamp")
     right = _ensure_timestamp_column(state).sort_values("timestamp")
 
-    left["timestamp"] = pd.to_datetime(left["timestamp"], utc=True).dt.tz_convert("America/New_York")
-    right["timestamp"] = pd.to_datetime(right["timestamp"], utc=True).dt.tz_convert("America/New_York")
+    left["timestamp"] = _to_ny_timestamp(left["timestamp"])
+    right["timestamp"] = _to_ny_timestamp(right["timestamp"])
 
     merged = pd.merge_asof(left, right, on="timestamp", direction="backward")
     merged = merged.set_index("timestamp").sort_index()
@@ -68,22 +113,19 @@ def add_model_feature_flags(merged: pd.DataFrame) -> pd.DataFrame:
     """
     out = merged.copy()
 
-    # Sweep proxy: touches below prev_day_low then closes back above it (bull context later in model gating)
+    # Sweep proxy: touches below prev_day_low then closes back above it
     out["swept_level"] = out["prev_day_low"]
 
-    # Failed CHOCH proxy:
-    # bullish trap idea proxy -> close crosses above rolling high then quickly back below
+    # Failed CHOCH proxy
     roll_hi = out["high"].rolling(6, min_periods=6).max().shift(1)
     broke_up = out["close"] > roll_hi
     failed_up = broke_up.shift(1).fillna(False) & (out["close"] < roll_hi)
     out["failed_choch_confirmed"] = failed_up.fillna(False)
 
-    # Pullback respected proxy:
-    # price above protected_swing_low in bull / below protected_swing_high in bear handled by model gate.
+    # Pullback respected proxy
     out["pullback_respected"] = True
 
-    # Internal sweep reclaim proxy:
-    # simple reclaim: current close > prior low (bull flavor); final logic still to be refined.
+    # Internal sweep reclaim proxy
     out["internal_sweep_reclaim"] = out["close"] > out["low"].shift(1)
 
     return out
@@ -185,8 +227,8 @@ def simulate_trades(symbol: str, df_3m: pd.DataFrame, cfg: StrategyConfig):
 
 
 def run_for_symbol(symbol: str, csv_path: Path, out_dir: Path, cfg: StrategyConfig):
-    df_3m = load_csv(csv_path)
-    df_3m = add_intraday_session_fields(df_3m)
+    df_3m = load_csv(str(csv_path))  # returns tz-aware DatetimeIndex (UTC)
+    df_3m = add_intraday_session_fields(df_3m)  # safe tz_convert now
     df_3m = add_liquidity_levels(df_3m)
 
     if cfg.rth_only:

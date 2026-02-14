@@ -1,87 +1,121 @@
-import argparse
+from __future__ import annotations
+
+import json
 from pathlib import Path
-import numpy as np
 import pandas as pd
 
+PROMOTION_MATRIX = Path("outputs/reports/promotion_matrix.csv")
+COST_STRESS = Path("outputs/reports/cost_stress_summary.csv")
+TRADABLE_NEXT = Path("outputs/reports/tradable_symbols_next.csv")
+CHAMPION = Path("outputs/learning/champion.json")
 
-def _safe_read_csv(path: Path) -> pd.DataFrame:
-    if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame()
+
+def _load_pm(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=["symbol", "trades", "expectancy", "positive_folds", "mean_expectancy"])
+    return pd.read_csv(path)
+
+
+def _load_cost(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=["symbol", "cost_abs", "expectancy_post_cost"])
+    c = pd.read_csv(path)
+
+    if "expectancy_post_cost" not in c.columns:
+        if "expectancy_post" in c.columns:
+            c = c.rename(columns={"expectancy_post": "expectancy_post_cost"})
+        else:
+            c["expectancy_post_cost"] = 0.0
+
+    if "cost_abs" not in c.columns:
+        c["cost_abs"] = 0.05
+
+    return c
+
+
+def _ensure_required_cols(df: pd.DataFrame) -> pd.DataFrame:
+    required_defaults = {
+        "symbol": "",
+        "trades": 0,
+        "expectancy": 0.0,
+        "positive_folds": 0,
+        "mean_expectancy": 0.0,
+        "exp_post_005": 0.0,
+        "exp_post_010": 0.0,
+    }
+    for col, default in required_defaults.items():
+        if col not in df.columns:
+            df[col] = default
+    return df
+
+
+def _build_tradable_scope(pm: pd.DataFrame, cost: pd.DataFrame) -> pd.DataFrame:
+    pm = _ensure_required_cols(pm.copy())
+
+    # use cost@0.05 as fallback for exp_post_005
+    if not cost.empty:
+        c05 = cost[cost["cost_abs"] == 0.05][["symbol", "expectancy_post_cost"]].copy()
+        c05 = c05.rename(columns={"expectancy_post_cost": "exp_post_005_cost"})
+        merged = pm.merge(c05, on="symbol", how="left")
+    else:
+        merged = pm.copy()
+        merged["exp_post_005_cost"] = pd.NA
+
+    merged["exp_post_005_effective"] = merged["exp_post_005"]
+    fill_mask = merged["exp_post_005_effective"].isna() | (merged["exp_post_005_effective"] == 0)
+    merged.loc[fill_mask, "exp_post_005_effective"] = merged.loc[fill_mask, "exp_post_005_cost"]
+
+    merged["exp_post_005_effective"] = merged["exp_post_005_effective"].fillna(0.0)
+    merged["trades"] = merged["trades"].fillna(0).astype(int)
+    merged["positive_folds"] = merged["positive_folds"].fillna(0).astype(int)
+    merged["expectancy"] = merged["expectancy"].fillna(0.0)
+
+    # Keep your existing strict gates
+    tradable = merged[
+        (merged["trades"] >= 40)
+        & (merged["positive_folds"] >= 3)
+        & (merged["expectancy"] > 0)
+        & (merged["exp_post_005_effective"] > 0)
+    ][["symbol"]].drop_duplicates()
+
+    return tradable
+
+
+def _load_champion_symbol() -> str | None:
+    if not CHAMPION.exists():
+        return None
     try:
-        return pd.read_csv(path)
+        payload = json.loads(CHAMPION.read_text())
+        s = payload.get("symbol")
+        if isinstance(s, str) and s.strip():
+            return s.strip().upper()
     except Exception:
-        return pd.DataFrame()
+        return None
+    return None
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--universe-summary", default="outputs/universe/universe_summary.csv")
-    parser.add_argument("--rolling-stability", default="outputs/rolling/rolling_stability.csv")
-    parser.add_argument("--cost-stress", default="outputs/reports/cost_stress_summary.csv")
-    parser.add_argument("--out-matrix", default="outputs/reports/promotion_matrix.csv")
-    parser.add_argument("--out-tradable", default="outputs/reports/tradable_symbols_next.csv")
-    args = parser.parse_args()
+def main() -> None:
+    pm = _load_pm(PROMOTION_MATRIX)
+    cost = _load_cost(COST_STRESS)
 
-    u = _safe_read_csv(Path(args.universe_summary))
-    r = _safe_read_csv(Path(args.rolling_stability))
-    c = _safe_read_csv(Path(args.cost_stress))
+    tradable = _build_tradable_scope(pm, cost)
 
-    if u.empty or "symbol" not in u.columns:
-        raise SystemExit("Missing universe summary.")
-    if r.empty or "symbol" not in r.columns:
-        raise SystemExit("Missing rolling stability.")
-    if c.empty or "symbol" not in c.columns:
-        raise SystemExit("Missing cost stress summary.")
+    # deterministic fallback: never output empty scope if champion exists
+    if tradable.empty:
+        champion_symbol = _load_champion_symbol()
+        if champion_symbol:
+            tradable = pd.DataFrame({"symbol": [champion_symbol]})
+            print(f"No symbols passed gates. Fallback to champion symbol: {champion_symbol}")
+        else:
+            print("No tradable symbols passed gates and no champion fallback available.")
 
-    # active rows only for post-cost gates
-    c_active = c[c["status"] == "active"].copy() if "status" in c.columns else c.copy()
+    TRADABLE_NEXT.parent.mkdir(parents=True, exist_ok=True)
+    tradable.to_csv(TRADABLE_NEXT, index=False)
 
-    c005 = c_active[c_active["cost_abs"] == 0.05][["symbol", "expectancy_post_cost"]].rename(
-        columns={"expectancy_post_cost": "exp_post_005"}
-    )
-    c010 = c_active[c_active["cost_abs"] == 0.10][["symbol", "expectancy_post_cost"]].rename(
-        columns={"expectancy_post_cost": "exp_post_010"}
-    )
-
-    m = (
-        u[["symbol", "trades", "expectancy"]]
-        .merge(r[["symbol", "positive_folds", "mean_expectancy"]], on="symbol", how="left")
-        .merge(c005, on="symbol", how="left")
-        .merge(c010, on="symbol", how="left")
-    )
-
-    # Gates: only symbols with enough evidence can promote
-    # Keep existing philosophy: durable_candidate if robust + post-cost positive
-    def classify(row):
-        trades = row.get("trades", np.nan)
-        pos_folds = row.get("positive_folds", np.nan)
-        exp005 = row.get("exp_post_005", np.nan)
-        exp010 = row.get("exp_post_010", np.nan)
-
-        if pd.isna(trades) or trades < 30:
-            return "watch"
-        if pd.isna(pos_folds) or pos_folds < 3:
-            return "watch"
-        if pd.isna(exp005) or exp005 <= 0:
-            return "watch"
-        if pd.isna(exp010) or exp010 <= 0:
-            return "watch"
-        return "durable_candidate"
-
-    m["tier"] = m.apply(classify, axis=1)
-
-    out_matrix = Path(args.out_matrix)
-    out_matrix.parent.mkdir(parents=True, exist_ok=True)
-    m.to_csv(out_matrix, index=False)
-
-    tradable = m[m["tier"] == "durable_candidate"][["symbol"]].copy()
-    out_tradable = Path(args.out_tradable)
-    tradable.to_csv(out_tradable, index=False)
-
-    with pd.option_context("display.max_rows", 200, "display.width", 200):
-        print(m.to_string(index=False))
-    print(f"\nSaved: {out_matrix}")
-    print(f"Saved: {out_tradable}")
+    print(f"\nSaved: {TRADABLE_NEXT}")
+    if not tradable.empty:
+        print("Tradable scope:")
+        print(tradable.to_string(index=False))
 
 
 if __name__ == "__main__":

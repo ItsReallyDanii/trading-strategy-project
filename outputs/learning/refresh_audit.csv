@@ -2,3 +2,5 @@ ts_utc,symbols,old_symbol,old_candidate_id,old_expectancy,refreshed,reason,new_s
 2026-02-14T06:45:47.699862+00:00,"QQQ,SPY,AAPL,IWM",QQQ,22,0.4213395690918,False,no_candidate_passed_guardrails,,,,0.01,40,3,0.0,0.0,-0.2,False
 2026-02-14T06:50:43.005547+00:00,"QQQ,SPY,AAPL,IWM",QQQ,22,0.4213395690918,False,no_candidate_passed_guardrails,,,,0.01,40,3,0.0,0.0,-0.2,True
 2026-02-14T07:17:27.160692+00:00,QQQ,QQQ,22,0.4213395690918,False,no_candidate_passed_guardrails,,,,0.01,40,3,0.0,0.0,-0.2,False
+2026-02-14T08:27:55.071525+00:00,"QQQ,SPY,AAPL,IWM",QQQ,22,0.4213395690918,False,no_candidate_passed_guardrails,,,,0.01,40,3,0.0,0.0,-0.2,True
+2026-02-14T08:30:34.987561+00:00,"QQQ,SPY,AAPL,IWM",QQQ,22,0.4213395690918,False,no_candidate_passed_guardrails,,,,0.01,40,3,0.0,0.0,-0.2,False

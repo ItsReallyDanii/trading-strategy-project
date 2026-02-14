@@ -1,0 +1,5 @@
+symbol,rows_1m,rows_3m,expected_minutes,missing_minutes,coverage,last_ts_utc,new_rows_fetched
+QQQ,0,0,0,0,0.0,,0
+SPY,0,0,0,0,0.0,,0
+AAPL,0,0,0,0,0.0,,0
+IWM,0,0,0,0,0.0,,0
