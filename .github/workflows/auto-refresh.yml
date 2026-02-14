@@ -1,0 +1,80 @@
+name: Auto Refresh Trading Loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated symbols"
+        required: false
+        default: "QQQ,SPY,AAPL,IWM"
+  schedule:
+    # 14:10 UTC weekdays (adjust to your market preference)
+    - cron: "10 14 * * 1-5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-refresh-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Ensure output dirs
+        run: |
+          mkdir -p outputs/learning outputs/reports outputs/universe outputs/rolling data/raw data/history
+
+      - name: Run auto refresh
+        run: |
+          SYMBOLS="${{ github.event.inputs.symbols }}"
+          if [ -z "$SYMBOLS" ]; then SYMBOLS="QQQ,SPY,AAPL,IWM"; fi
+          python -m src.learning.auto_refresh \
+            --symbols "$SYMBOLS" \
+            --champion outputs/learning/champion.json \
+            --leaderboard outputs/learning/challenger_leaderboard.csv
+
+      - name: Validate deploy scope (explicit)
+        run: |
+          python -m src.tools.validate_deploy_scope
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: refresh-artifacts-${{ github.run_number }}
+          path: |
+            outputs/universe/universe_summary.csv
+            outputs/rolling/rolling_summary.csv
+            outputs/rolling/rolling_stability.csv
+            outputs/reports/cost_stress_summary.csv
+            outputs/reports/promotion_matrix.csv
+            outputs/reports/tradable_symbols_next.csv
+            outputs/learning/champion.json
+            outputs/learning/champion_decay_status.json
+            outputs/learning/challenger_leaderboard.csv
+            outputs/learning/refresh_audit.csv
+          if-no-files-found: warn
+
+      - name: Commit refreshed state files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add outputs data/history data/raw || true
+          git diff --cached --quiet || git commit -m "auto-refresh: update outputs and history [skip ci]"
+          git push
