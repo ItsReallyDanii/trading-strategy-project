@@ -1,104 +1,85 @@
-
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List, Optional
 
-from .conditions import (
-    Params,
-    is_real_break_long, is_real_break_short,
-    retest_touch_long, retest_touch_short,
-    retest_hold_long, retest_hold_short,
-    wick_rejection_long, wick_rejection_short,
-    thresholdA_pass_long, thresholdA_pass_short,
-    thresholdB_pass_long, thresholdB_pass_short
+import pandas as pd
+
+from src.rules_engine.bias_engine import external_bias_decision
+from src.rules_engine.entry_models import (
+    model_a_sweep_reclaim,
+    model_b_failed_choch,
+    model_c_continuation_pullback,
 )
+from src.rules_engine.parameters import StrategyConfig
+
 
 @dataclass
-class SignalResult:
-    entry_signal: bool
-    side: Optional[str]               # "long", "short", or None
+class Signal:
+    timestamp: pd.Timestamp
+    symbol: str
+    signal: bool
+    side: Optional[str]
+    model: Optional[str]
     reason_codes: List[str]
-    key_level: float
-    break_index: Optional[int]
-    retest_index: Optional[int]
+    entry_price: Optional[float]
 
-def evaluate_signal(
-    bars: List[Dict[str, float]],
-    key_level: float,
-    p: Params,
-    allow_long: bool = True,
-    allow_short: bool = True
-) -> SignalResult:
-    """
-    bars: sequential bars; each bar has keys: open, high, low, close
-    assumes last bar is current context window end
-    """
+
+def generate_signal_for_bar(
+    *,
+    symbol: str,
+    ts: pd.Timestamp,
+    row_3m: pd.Series,
+    row_15m: pd.Series,
+    cfg: StrategyConfig,
+) -> Signal:
     reasons: List[str] = []
-    n = len(bars)
-    if n < 3:
-        return SignalResult(False, None, ["ERR_NOT_ENOUGH_BARS"], key_level, None, None)
 
-    # naive break detection on penultimate bar
-    b = n - 2
-    bar_b = bars[b]
+    # 1) External bias gate
+    bias_dec = external_bias_decision(row_15m)
+    reasons.append(bias_dec.reason)
+    if not bias_dec.tradable:
+        return Signal(ts, symbol, False, None, None, reasons, None)
 
-    long_break = allow_long and is_real_break_long(bar_b["close"], bar_b["high"], key_level, p)
-    short_break = allow_short and is_real_break_short(bar_b["close"], bar_b["low"], key_level, p)
+    # buffer using ATR from 15m
+    atr = row_15m.get("atr", None)
+    if atr is None or pd.isna(atr):
+        return Signal(ts, symbol, False, None, None, reasons + ["ATR_NA"], None)
+    buffer_val = float(atr) * cfg.reclaim_buffer_atr
 
-    if not (long_break or short_break):
-        return SignalResult(False, None, ["NO_REAL_BREAK"], key_level, None, None)
+    # Inputs expected from feature pipeline (placeholder friendly)
+    swept_level = row_3m.get("swept_level", None)
+    reclaim_bar = {
+        "open": row_3m.get("open"),
+        "high": row_3m.get("high"),
+        "low": row_3m.get("low"),
+        "close": row_3m.get("close"),
+    }
+    failed_choch_confirmed = bool(row_3m.get("failed_choch_confirmed", False))
+    pullback_respected = bool(row_3m.get("pullback_respected", False))
+    internal_sweep_reclaim = bool(row_3m.get("internal_sweep_reclaim", False))
 
-    side = "long" if long_break else "short"
-    reasons.append(f"REAL_BREAK_{side.upper()}")
+    # 2) Model priority A -> B -> C (can change later)
+    a = model_a_sweep_reclaim(
+        bias=bias_dec.bias,
+        swept_level=swept_level,
+        reclaim_bar=reclaim_bar,
+        buffer_val=buffer_val,
+    )
+    if a.passed:
+        return Signal(ts, symbol, True, a.side, a.model, reasons + a.reason_codes, float(row_3m["close"]))
 
-    # retest search window
-    retest_idx = None
-    end_idx = min(n - 1, b + p.max_retest_bars)
-    for i in range(b + 1, end_idx + 1):
-        bi = bars[i]
-        if side == "long":
-            if retest_touch_long(bi["low"], key_level, p):
-                retest_idx = i
-                break
-        else:
-            if retest_touch_short(bi["high"], key_level, p):
-                retest_idx = i
-                break
+    b = model_b_failed_choch(
+        bias=bias_dec.bias,
+        failed_choch_confirmed=failed_choch_confirmed,
+    )
+    if b.passed:
+        return Signal(ts, symbol, True, b.side, b.model, reasons + b.reason_codes, float(row_3m["close"]))
 
-    if retest_idx is None:
-        return SignalResult(False, side, reasons + ["NO_RETEST_IN_WINDOW"], key_level, b, None)
+    c = model_c_continuation_pullback(
+        bias=bias_dec.bias,
+        pullback_respected=pullback_respected,
+        internal_sweep_reclaim=internal_sweep_reclaim,
+    )
+    if c.passed:
+        return Signal(ts, symbol, True, c.side, c.model, reasons + c.reason_codes, float(row_3m["close"]))
 
-    r = bars[retest_idx]
-    if side == "long":
-        hold = retest_hold_long(r["close"], key_level, p)
-        wick = wick_rejection_long(r["open"], r["high"], r["low"], r["close"], p)
-    else:
-        hold = retest_hold_short(r["close"], key_level, p)
-        wick = wick_rejection_short(r["open"], r["high"], r["low"], r["close"], p)
-
-    if not hold:
-        return SignalResult(False, side, reasons + ["RETEST_FAIL_CLOSE"], key_level, b, retest_idx)
-    if not wick:
-        return SignalResult(False, side, reasons + ["REJECTION_WICK_FAIL"], key_level, b, retest_idx)
-
-    reasons += ["RETEST_HOLD_PASS", "WICK_REJECTION_PASS"]
-
-    # threshold checks using next up-to-2 bars after retest (or available)
-    post = bars[retest_idx:min(retest_idx + 3, n)]
-    max_high = max(x["high"] for x in post)
-    min_low = min(x["low"] for x in post)
-    cbar = post[-1]
-
-    if side == "long":
-        a_pass = thresholdA_pass_long(max_high, key_level, p)
-        b_pass = thresholdB_pass_long(cbar["open"], cbar["high"], cbar["low"], cbar["close"], p)
-    else:
-        a_pass = thresholdA_pass_short(min_low, key_level, p)
-        b_pass = thresholdB_pass_short(cbar["open"], cbar["high"], cbar["low"], cbar["close"], p)
-
-    if not a_pass:
-        return SignalResult(False, side, reasons + ["THRESHOLD_A_FAIL"], key_level, b, retest_idx)
-    if not b_pass:
-        return SignalResult(False, side, reasons + ["THRESHOLD_B_FAIL"], key_level, b, retest_idx)
-
-    reasons += ["THRESHOLD_A_PASS", "THRESHOLD_B_PASS", "ENTRY_SIGNAL_TRUE"]
-    return SignalResult(True, side, reasons, key_level, b, retest_idx)
+    return Signal(ts, symbol, False, None, None, reasons + a.reason_codes + b.reason_codes + c.reason_codes, None)
