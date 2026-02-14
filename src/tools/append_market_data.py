@@ -91,21 +91,24 @@ def fetch_1m_safe(
         except Exception:
             df = pd.DataFrame()
 
-    # Fallback to rolling period
+    # Fallback to rolling period windows (short then broader)
     if df is None or df.empty:
-        try:
-            df = yf.download(
-                symbol,
-                period="7d",
-                interval="1m",
-                auto_adjust=False,
-                progress=False,
-                prepost=False,
-                threads=False,
-                group_by="column",
-            )
-        except Exception:
-            df = pd.DataFrame()
+        for period in ("7d", "1mo"):
+            try:
+                df = yf.download(
+                    symbol,
+                    period=period,
+                    interval="1m",
+                    auto_adjust=False,
+                    progress=False,
+                    prepost=False,
+                    threads=False,
+                    group_by="column",
+                )
+            except Exception:
+                df = pd.DataFrame()
+            if df is not None and not df.empty:
+                break
 
     if df is None or df.empty:
         return pd.DataFrame(columns=cols)
@@ -188,7 +191,7 @@ def append_for_symbol(symbol: str, base_dir: Path, lookback_hours: int = 48) -> 
     new_1m = fetch_1m_safe(symbol=symbol, start=start_ts, end=end_ts)
 
     if new_1m.empty:
-        print(f"{symbol}: no new rows fetched; keeping existing files unchanged")
+        print(f"{symbol}: no new rows fetched for 1m window; keeping existing files unchanged")
         # IMPORTANT: do not overwrite files with empties
         return 0
 
