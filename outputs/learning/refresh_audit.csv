@@ -1,3 +1,4 @@
 ts_utc,symbols,old_symbol,old_candidate_id,old_expectancy,refreshed,reason,new_symbol,new_candidate_id,new_expectancy,min_delta,min_trades,min_pos_folds,min_exp_post_005,min_exp_post_010,min_expectancy_floor,dry_run
 2026-02-14T06:45:47.699862+00:00,"QQQ,SPY,AAPL,IWM",QQQ,22,0.4213395690918,False,no_candidate_passed_guardrails,,,,0.01,40,3,0.0,0.0,-0.2,False
 2026-02-14T06:50:43.005547+00:00,"QQQ,SPY,AAPL,IWM",QQQ,22,0.4213395690918,False,no_candidate_passed_guardrails,,,,0.01,40,3,0.0,0.0,-0.2,True
+2026-02-14T07:24:12.943016+00:00,QQQ,QQQ,22,0.4213395690918,False,no_candidate_passed_guardrails,,,,0.01,40,3,0.0,0.0,-0.2,False
