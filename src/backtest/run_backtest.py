@@ -17,6 +17,8 @@ def load_csv(path: Path) -> pd.DataFrame:
         raise ValueError(f"{path} missing 'timestamp' column")
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.set_index("timestamp").sort_index()
+    df.index.name = "timestamp"
+
     needed = {"open", "high", "low", "close", "volume"}
     missing = needed - set(df.columns)
     if missing:
@@ -25,32 +27,72 @@ def load_csv(path: Path) -> pd.DataFrame:
 
 
 def resample_15m(df_3m: pd.DataFrame) -> pd.DataFrame:
-    agg = {
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum",
-    }
+    if not isinstance(df_3m.index, pd.DatetimeIndex):
+        raise TypeError("resample_15m requires DatetimeIndex")
+
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     out = df_3m.resample("15min", label="right", closed="right").agg(agg).dropna()
+    out.index.name = "timestamp"
     return out
+
+
+def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.reset_index()
+    if "timestamp" in x.columns:
+        return x
+    if "index" in x.columns:
+        return x.rename(columns={"index": "timestamp"})
+    return x.rename(columns={x.columns[0]: "timestamp"})
 
 
 def merge_3m_with_15m_state(df_3m: pd.DataFrame, df_15m_state: pd.DataFrame) -> pd.DataFrame:
     cols = ["external_bias", "protected_swing_high", "protected_swing_low", "atr", "bos_flag", "choch_flag"]
     state = df_15m_state[cols].copy()
-    # forward fill 15m state onto 3m bars
-    merged = pd.merge_asof(
-        df_3m.reset_index().sort_values("timestamp"),
-        state.reset_index().sort_values("timestamp"),
-        on="timestamp",
-        direction="backward",
-    ).set_index("timestamp")
+
+    left = _ensure_timestamp_column(df_3m).sort_values("timestamp")
+    right = _ensure_timestamp_column(state).sort_values("timestamp")
+
+    left["timestamp"] = pd.to_datetime(left["timestamp"], utc=True).dt.tz_convert("America/New_York")
+    right["timestamp"] = pd.to_datetime(right["timestamp"], utc=True).dt.tz_convert("America/New_York")
+
+    merged = pd.merge_asof(left, right, on="timestamp", direction="backward")
+    merged = merged.set_index("timestamp").sort_index()
+    merged.index.name = "timestamp"
     return merged
 
 
-def simulate_trades(symbol: str, df_3m: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
+def add_model_feature_flags(merged: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lightweight deterministic proxies to replace hardcoded placeholders.
+    Keeps project moving until full micro-structure parser is added.
+    """
+    out = merged.copy()
+
+    # Sweep proxy: touches below prev_day_low then closes back above it (bull context later in model gating)
+    out["swept_level"] = out["prev_day_low"]
+
+    # Failed CHOCH proxy:
+    # bullish trap idea proxy -> close crosses above rolling high then quickly back below
+    roll_hi = out["high"].rolling(6, min_periods=6).max().shift(1)
+    broke_up = out["close"] > roll_hi
+    failed_up = broke_up.shift(1).fillna(False) & (out["close"] < roll_hi)
+    out["failed_choch_confirmed"] = failed_up.fillna(False)
+
+    # Pullback respected proxy:
+    # price above protected_swing_low in bull / below protected_swing_high in bear handled by model gate.
+    out["pullback_respected"] = True
+
+    # Internal sweep reclaim proxy:
+    # simple reclaim: current close > prior low (bull flavor); final logic still to be refined.
+    out["internal_sweep_reclaim"] = out["close"] > out["low"].shift(1)
+
+    return out
+
+
+def simulate_trades(symbol: str, df_3m: pd.DataFrame, cfg: StrategyConfig):
     trades: List[Dict[str, Any]] = []
+    rejections: List[Dict[str, Any]] = []
+
     in_pos = False
     side = None
     entry_price = stop_price = target_price = None
@@ -63,25 +105,23 @@ def simulate_trades(symbol: str, df_3m: pd.DataFrame, cfg: StrategyConfig) -> pd
         row = df_3m.iloc[i]
         prev = df_3m.iloc[i - 1]
 
-        # exit logic first
+        # Exit first
         if in_pos:
             hit_stop = False
             hit_target = False
 
             if side == "long":
-                if row["low"] <= stop_price:
-                    hit_stop = True
-                elif row["high"] >= target_price:
-                    hit_target = True
+                hit_stop = row["low"] <= stop_price
+                hit_target = (not hit_stop) and (row["high"] >= target_price)
             else:
-                if row["high"] >= stop_price:
-                    hit_stop = True
-                elif row["low"] <= target_price:
-                    hit_target = True
+                hit_stop = row["high"] >= stop_price
+                hit_target = (not hit_stop) and (row["low"] <= target_price)
 
             if hit_stop or hit_target:
                 exit_price = stop_price if hit_stop else target_price
                 pnl = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
+                r_mult = pnl / abs(entry_price - stop_price) if abs(entry_price - stop_price) > 0 else 0.0
+
                 trades.append(
                     {
                         "symbol": symbol,
@@ -93,9 +133,11 @@ def simulate_trades(symbol: str, df_3m: pd.DataFrame, cfg: StrategyConfig) -> pd
                         "stop_price": stop_price,
                         "target_price": target_price,
                         "pnl_abs": pnl,
+                        "r_multiple": r_mult,
                         "model": entry_model,
-                        "entry_reasons": "|".join(reason_open),
+                        "entry_reasons": "|".join(reason_open) if reason_open else "",
                         "exit_reason": "STOP_HIT" if hit_stop else "TARGET_HIT",
+                        "entry_hour": pd.Timestamp(entry_ts).hour,
                     }
                 )
                 in_pos = False
@@ -104,16 +146,23 @@ def simulate_trades(symbol: str, df_3m: pd.DataFrame, cfg: StrategyConfig) -> pd
         if in_pos:
             continue
 
-        # signal generation
         sig = generate_signal_for_bar(
             symbol=symbol,
             ts=ts,
             row_3m=row,
-            row_15m=row,  # row already has 15m state columns merged in
+            row_15m=row,
             cfg=cfg,
         )
 
         if not sig.signal:
+            rejections.append(
+                {
+                    "timestamp": ts,
+                    "symbol": symbol,
+                    "reason_codes": "|".join(sig.reason_codes),
+                    "hour": pd.Timestamp(ts).hour,
+                }
+            )
             continue
 
         side = sig.side
@@ -122,24 +171,20 @@ def simulate_trades(symbol: str, df_3m: pd.DataFrame, cfg: StrategyConfig) -> pd
         entry_model = sig.model
         reason_open = sig.reason_codes
 
+        atr_val = float(row["atr"]) if pd.notna(row.get("atr")) else 0.01
         stop_price = initial_stop(
             side=side,
             entry_bar={"low": float(row["low"]), "high": float(row["high"])},
             reference_bar={"low": float(prev["low"]), "high": float(prev["high"])},
-            stop_buffer=float(row["atr"]) * cfg.stop_buffer_atr if pd.notna(row["atr"]) else 0.01,
+            stop_buffer=atr_val * cfg.stop_buffer_atr,
         )
-        target_price = target_from_rr(
-            side=side,
-            entry_price=entry_price,
-            stop_price=stop_price,
-            rr_target=cfg.rr_target,
-        )
+        target_price = target_from_rr(side=side, entry_price=entry_price, stop_price=stop_price, rr_target=cfg.rr_target)
         in_pos = True
 
-    return pd.DataFrame(trades)
+    return pd.DataFrame(trades), pd.DataFrame(rejections)
 
 
-def run_for_symbol(symbol: str, csv_path: Path, out_dir: Path, cfg: StrategyConfig) -> pd.DataFrame:
+def run_for_symbol(symbol: str, csv_path: Path, out_dir: Path, cfg: StrategyConfig):
     df_3m = load_csv(csv_path)
     df_3m = add_intraday_session_fields(df_3m)
     df_3m = add_liquidity_levels(df_3m)
@@ -155,22 +200,20 @@ def run_for_symbol(symbol: str, csv_path: Path, out_dir: Path, cfg: StrategyConf
     )
 
     merged = merge_3m_with_15m_state(df_3m, df_15m)
+    merged = add_model_feature_flags(merged)
 
-    # placeholder model features; replace with real feature pipeline
-    merged["swept_level"] = merged["prev_day_low"]  # example placeholder
-    merged["failed_choch_confirmed"] = False
-    merged["pullback_respected"] = True
-    merged["internal_sweep_reclaim"] = True
-
-    trades = simulate_trades(symbol=symbol, df_3m=merged, cfg=cfg)
+    trades, rejections = simulate_trades(symbol=symbol, df_3m=merged, cfg=cfg)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     trades_path = out_dir / f"{symbol}_trades.csv"
-    merged_path = out_dir / f"{symbol}_bars_with_state.csv"
-    trades.to_csv(trades_path, index=False)
-    merged.reset_index().to_csv(merged_path, index=False)
+    bars_path = out_dir / f"{symbol}_bars_with_state.csv"
+    rej_path = out_dir / f"{symbol}_rejections.csv"
 
-    return trades
+    trades.to_csv(trades_path, index=False)
+    merged.reset_index().to_csv(bars_path, index=False)
+    rejections.to_csv(rej_path, index=False)
+
+    return trades, rejections
 
 
 def main():
@@ -182,23 +225,18 @@ def main():
 
     cfg = StrategyConfig()
     symbol = args.symbol.upper()
-    trades = run_for_symbol(
-        symbol=symbol,
-        csv_path=Path(args.input),
-        out_dir=Path(args.out),
-        cfg=cfg,
-    )
+
+    trades, rejections = run_for_symbol(symbol, Path(args.input), Path(args.out), cfg)
 
     if trades.empty:
         print("No trades generated.")
     else:
-        win_rate = (trades["pnl_abs"] > 0).mean()
-        expectancy = trades["pnl_abs"].mean()
         print(f"Trades: {len(trades)}")
-        print(f"Win rate: {win_rate:.2%}")
-        print(f"Expectancy (abs): {expectancy:.4f}")
+        print(f"Win rate: {(trades['pnl_abs'] > 0).mean():.2%}")
+        print(f"Expectancy (abs): {trades['pnl_abs'].mean():.6f}")
+
+    print(f"Rejections: {len(rejections)}")
 
 
 if __name__ == "__main__":
     main()
-

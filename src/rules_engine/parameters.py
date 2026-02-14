@@ -1,34 +1,29 @@
 from dataclasses import dataclass
+from typing import Tuple
 
 
-@dataclass(frozen=True)
+@dataclass
 class StrategyConfig:
-    # Timeframes
-    external_tf: str = "15min"
-    execution_tf: str = "3min"
-
-    # Session
-    rth_only: bool = True
-
-    # Universe
-    include_indices: bool = True
-    include_large_caps: bool = True
-    include_etfs: bool = True
-
-    # Structure / displacement
-    displacement_atr_mult: float = 0.7
+    displacement_atr_mult: float = 1.1
     min_break_close_buffer_atr: float = 0.05
 
-    # Retest / reclaim
-    reclaim_buffer_atr: float = 0.03
-    max_retest_bars_execution_tf: int = 8  # 8 x 3m = 24m
-
-    # Liquidity / equal highs-lows tolerance
-    equal_level_tolerance_atr: float = 0.08
-
-    # Risk
+    rr_target: float = 2.5
     stop_buffer_atr: float = 0.05
-    rr_target: float = 2.0  # structure target logic can replace later
+    reclaim_buffer_atr: float = 0.03
 
-    # Reporting
-    risk_per_trade_pct: float = 0.005  # 0.5%
+    rth_only: bool = True
+    allowed_entry_hours: Tuple[int, ...] = (10,)
+
+    enable_model_a: bool = False
+    enable_model_b: bool = False
+    enable_model_c: bool = True
+
+    long_only: bool = False
+
+    # DEPLOY LOCK: primary only
+    allowed_symbols: Tuple[str, ...] = ("QQQ",)
+
+    # optional filter remains off unless explicitly tested
+    use_atr_regime_filter: bool = False
+    atr_pct_min: float = 0.2
+    atr_pct_max: float = 0.8

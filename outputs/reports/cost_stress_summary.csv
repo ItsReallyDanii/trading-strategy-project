@@ -1,0 +1,13 @@
+symbol,status,inactive_reason,cost_abs,trades,win_rate,expectancy_pre_cost,expectancy_post_cost
+QQQ,active,,0.02,83.0,0.3855421686746988,0.23263623078390314,0.21263623078390326
+QQQ,active,,0.05,83.0,0.3855421686746988,0.23263623078390314,0.1826362307839031
+QQQ,active,,0.1,83.0,0.3855421686746988,0.23263623078390314,0.13263623078390321
+SPY,inactive_scope,not_in_tradable_symbols_next,0.02,,,,
+SPY,inactive_scope,not_in_tradable_symbols_next,0.05,,,,
+SPY,inactive_scope,not_in_tradable_symbols_next,0.1,,,,
+AAPL,inactive_scope,not_in_tradable_symbols_next,0.02,,,,
+AAPL,inactive_scope,not_in_tradable_symbols_next,0.05,,,,
+AAPL,inactive_scope,not_in_tradable_symbols_next,0.1,,,,
+IWM,inactive_scope,not_in_tradable_symbols_next,0.02,,,,
+IWM,inactive_scope,not_in_tradable_symbols_next,0.05,,,,
+IWM,inactive_scope,not_in_tradable_symbols_next,0.1,,,,

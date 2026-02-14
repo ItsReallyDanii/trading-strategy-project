@@ -1,0 +1,19 @@
+profile_name: qqq_paper_v1
+symbols:
+  - QQQ
+models:
+  A: false
+  B: false
+  C: true
+execution:
+  allowed_entry_hours: [10]
+risk:
+  max_trades_per_day: 3
+  max_daily_loss_abs: 1.0
+  max_consecutive_losses: 3
+cost_assumption_abs: 0.05
+promotion_rules:
+  min_trades: 50
+  min_positive_folds: 3
+  min_mean_expectancy: 0.0
+  min_post_cost_005: 0.0

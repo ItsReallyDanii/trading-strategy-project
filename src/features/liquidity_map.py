@@ -1,52 +1,45 @@
 import pandas as pd
 
 
-def add_intraday_session_fields(df: pd.DataFrame, tz: str = "America/New_York") -> pd.DataFrame:
+def add_intraday_session_fields(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    if out.index.tz is None:
-        out.index = out.index.tz_localize("UTC").tz_convert(tz)
-    else:
-        out.index = out.index.tz_convert(tz)
+    if not isinstance(out.index, pd.DatetimeIndex):
+        raise TypeError("add_intraday_session_fields expects DatetimeIndex")
 
-    out["session_date"] = out.index.date
-    out["hour"] = out.index.hour
-    out["minute"] = out.index.minute
-    out["is_rth"] = ((out["hour"] > 9) | ((out["hour"] == 9) & (out["minute"] >= 30))) & (
-        (out["hour"] < 16) | ((out["hour"] == 16) & (out["minute"] == 0))
-    )
+    # convert to NY session context
+    ts_ny = out.index.tz_convert("America/New_York")
+    out["session_date"] = ts_ny.date
+    out["hour"] = ts_ny.hour
+    out["minute"] = ts_ny.minute
+
+    # RTH: 09:30 to 16:00 NY
+    mins = out["hour"] * 60 + out["minute"]
+    out["is_rth"] = (mins >= (9 * 60 + 30)) & (mins <= 16 * 60)
+
     return out
 
 
 def add_liquidity_levels(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds:
-      - premarket_high, premarket_low
-      - prev_day_high, prev_day_low
-      - day_high_so_far, day_low_so_far
-    """
     out = df.copy()
 
-    # day high/low so far
+    # hard-cast OHLCV to numeric to avoid object cummax/cummin crashes
+    for c in ["open", "high", "low", "close", "volume"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    out = out.dropna(subset=["open", "high", "low", "close"])
+
+    if "session_date" not in out.columns:
+        raise ValueError("session_date missing. Run add_intraday_session_fields first.")
+
+    # rolling intraday range
     out["day_high_so_far"] = out.groupby("session_date")["high"].cummax()
     out["day_low_so_far"] = out.groupby("session_date")["low"].cummin()
 
-    # premarket = before 09:30
-    pre = out[(out["hour"] < 9) | ((out["hour"] == 9) & (out["minute"] < 30))]
-    pm_hi = pre.groupby("session_date")["high"].max().rename("premarket_high")
-    pm_lo = pre.groupby("session_date")["low"].min().rename("premarket_low")
+    # previous day high/low
+    day_hilo = out.groupby("session_date").agg(day_high=("high", "max"), day_low=("low", "min")).sort_index()
+    day_hilo["prev_day_high"] = day_hilo["day_high"].shift(1)
+    day_hilo["prev_day_low"] = day_hilo["day_low"].shift(1)
 
-    out = out.merge(pm_hi, on="session_date", how="left")
-    out = out.merge(pm_lo, on="session_date", how="left")
-
-    # prev day high/low
-    day_hi = out.groupby("session_date")["high"].max().rename("day_high")
-    day_lo = out.groupby("session_date")["low"].min().rename("day_low")
-
-    day_df = pd.concat([day_hi, day_lo], axis=1).reset_index()
-    day_df["prev_day_high"] = day_df["day_high"].shift(1)
-    day_df["prev_day_low"] = day_df["day_low"].shift(1)
-
-    out = out.merge(day_df[["session_date", "prev_day_high", "prev_day_low"]], on="session_date", how="left")
+    out = out.join(day_hilo[["prev_day_high", "prev_day_low"]], on="session_date")
 
     return out
-

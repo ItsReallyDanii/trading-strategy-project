@@ -1,0 +1,5 @@
+symbol,trades,expectancy,positive_folds,mean_expectancy,exp_post_005,exp_post_010,tier
+QQQ,83,0.2326362307839031,3.0,0.6375914131501875,0.1826362307839031,0.1326362307839032,durable_candidate
+SPY,0,0.0,2.0,-0.0106561678405276,,,watch
+AAPL,0,0.0,,,,,watch
+IWM,0,0.0,,,,,watch

@@ -58,6 +58,11 @@ def make_ohlcv_3m(
 
 def main():
     out_dir = Path("data/raw")
+
+    # If a file exists at data/raw, remove it first.
+    if out_dir.exists() and out_dir.is_file():
+        out_dir.unlink()
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     symbols = ["SPY", "QQQ", "AAPL"]
