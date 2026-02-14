@@ -1,0 +1,10 @@
+{
+  "symbol": "QQQ",
+  "lookback_rows": 2,
+  "max_fail_streak": 2,
+  "fail_streak_threshold": 3,
+  "decay_triggered": false,
+  "current_champion_candidate_id": 22,
+  "current_expectancy": 0.4213395690918,
+  "action": "keep_champion"
+}
