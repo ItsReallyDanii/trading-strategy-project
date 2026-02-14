@@ -1,0 +1,16 @@
+{
+  "symbol": "QQQ",
+  "candidate_id": 22,
+  "disp": 1.2,
+  "rr": 2.5,
+  "reclaim": 0.02,
+  "trades": 65,
+  "win_rate": 0.3692307692307692,
+  "expectancy": 0.4213395690918,
+  "exp_post_005": 0.3713395690918,
+  "exp_post_010": 0.3213395690918,
+  "positive_folds": 3,
+  "mean_expectancy": 0.7650783793642607,
+  "min_expectancy": -0.1020033123112532,
+  "score": 0.5144612121735381
+}
